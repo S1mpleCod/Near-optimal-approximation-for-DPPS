@@ -22,7 +22,7 @@ static ReduceStats coReduce(const LayeredGraph& g, const vector<double>& M,
         for (int j = 1; j < i; ++j)
             for (int u = 0; u < g.n[j]; ++u) if (active[j][u]) {
                 long double s = 0;
-                for (int w : g.adjL[j][u]) if (active[j - 1][w]) s += L[j - 1][w];
+                for (int w : g.outL(j, u)) if (active[j - 1][w]) s += L[j - 1][w];
                 L[j][u] = s;
             }
         for (int j = 0; j < i; ++j) std::fill(R[j].begin(), R[j].end(), 0.0L);
@@ -30,7 +30,7 @@ static ReduceStats coReduce(const LayeredGraph& g, const vector<double>& M,
         for (int j = i - 2; j >= 0; --j)
             for (int u = 0; u < g.n[j]; ++u) if (active[j][u]) {
                 long double s = 0;
-                for (int w : g.adjR[j][u]) if (active[j + 1][w]) s += R[j + 1][w];
+                for (int w : g.outR(j, u)) if (active[j + 1][w]) s += R[j + 1][w];
                 R[j][u] = s;
             }
     };
@@ -38,7 +38,7 @@ static ReduceStats coReduce(const LayeredGraph& g, const vector<double>& M,
         V = 0; E = 0; F = 0;
         for (int j = 0; j < i; ++j) for (int u = 0; u < g.n[j]; ++u) if (active[j][u]) ++V;
         for (int j = 0; j + 1 < i; ++j) for (int u = 0; u < g.n[j]; ++u) if (active[j][u])
-            for (int w : g.adjR[j][u]) if (active[j + 1][w]) ++E;
+            for (int w : g.outR(j, u)) if (active[j + 1][w]) ++E;
         for (int u = 0; u < g.n[i - 1]; ++u) if (active[i - 1][u]) F += L[i - 1][u];
     };
 
@@ -99,7 +99,7 @@ static void buildReducedInto(const LayeredGraph& g, const vector<vector<char>>& 
     const int i = g.i;
     auto grow = [](auto& v, size_t sz) { if (v.size() < sz) v.resize(sz); };
     r.i = i;
-    grow(r.n, i); grow(fwd, i); grow(backmap, i); grow(r.adjR, i);
+    grow(r.n, i); grow(fwd, i); grow(backmap, i); grow(r.offR, i); grow(r.nbrR, i);
     for (int j = 0; j < i; ++j) {
         grow(fwd[j], (size_t)g.n[j]);
         std::fill(fwd[j].begin(), fwd[j].begin() + g.n[j], -1);
@@ -108,12 +108,23 @@ static void buildReducedInto(const LayeredGraph& g, const vector<vector<char>>& 
         for (int u = 0; u < g.n[j]; ++u)
             if (active[j][u]) { fwd[j][u] = r.n[j]++; backmap[j].push_back(u); }
     }
+    // reduced CSR written straight into r's reusable buffers (counting pass + fill pass)
     for (int j = 0; j < i; ++j) {
-        grow(r.adjR[j], (size_t)r.n[j]);
-        for (int u = 0; u < r.n[j]; ++u) r.adjR[j][u].clear();
+        grow(r.offR[j], (size_t)r.n[j] + 1);
+        std::fill(r.offR[j].begin(), r.offR[j].begin() + r.n[j] + 1, 0);
+        if (j + 1 < i) {
+            for (int u = 0; u < g.n[j]; ++u) if (active[j][u]) {
+                int d = 0;
+                for (int w : g.outR(j, u)) if (active[j + 1][w]) ++d;
+                r.offR[j][fwd[j][u] + 1] = d;
+            }
+            for (int u = 0; u < r.n[j]; ++u) r.offR[j][u + 1] += r.offR[j][u];
+            grow(r.nbrR[j], (size_t)r.offR[j][r.n[j]]);
+            for (int u = 0; u < g.n[j]; ++u) if (active[j][u]) {
+                int* out = r.nbrR[j].data() + r.offR[j][fwd[j][u]];
+                for (int w : g.outR(j, u)) if (active[j + 1][w]) *out++ = fwd[j + 1][w];
+            }
+        }
     }
-    for (int j = 0; j + 1 < i; ++j)
-        for (int u = 0; u < g.n[j]; ++u) if (active[j][u])
-            for (int w : g.adjR[j][u]) if (active[j + 1][w])
-                r.adjR[j][fwd[j][u]].push_back(fwd[j + 1][w]);
+    r.buildReverse();
 }

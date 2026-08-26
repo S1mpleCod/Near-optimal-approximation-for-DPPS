@@ -27,7 +27,7 @@ has zero codegen/perf impact.
 | File | Contents | Paper section |
 |---|---|---|
 | `dpss_common.hpp` | includes, allocation counter (`--alloc`), deadline cutoff | — |
-| `layered_graph.hpp` | `LayeredGraph`, typed-edge / query-directory readers, L·R instance DP | §6 instance-free solver |
+| `layered_graph.hpp` | `LayeredGraph` (CSR adjacency, `outR`/`outL` spans), typed-edge / query-directory readers, L·R instance DP | §6 instance-free solver |
 | `grid.hpp` | η-net builders: first/second-order nets, Δ-box localization, adaptive Δ-box cell test | §5 covering |
 | `peeler.hpp` | `Peeler`: 1/i peel, near-opt iterative peeling, dual-gap certificate (Frank–Wolfe), certified peeling | §6 cell solver |
 | `config.hpp` | flags/globals, uniform pass budget T, `GridResult` | — |

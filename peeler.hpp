@@ -28,8 +28,8 @@ public:
         }
         for (int j = 0; j + 1 < i_; ++j)
             for (int u = 0; u < n_[j]; ++u) {
-                oR_[j][u + 1] += (int)g.adjR[j][u].size();
-                for (int v : g.adjR[j][u]) ++oL_[j + 1][v + 1];
+                oR_[j][u + 1] += (int)g.degR(j, u);
+                for (int v : g.outR(j, u)) ++oL_[j + 1][v + 1];
             }
         for (int j = 0; j < i_; ++j) {
             for (int u = 0; u < n_[j]; ++u) { oR_[j][u + 1] += oR_[j][u]; oL_[j][u + 1] += oL_[j][u]; }
@@ -39,7 +39,7 @@ public:
         }
         for (int j = 0; j + 1 < i_; ++j)
             for (int u = 0; u < n_[j]; ++u)
-                for (int v : g.adjR[j][u]) {
+                for (int v : g.outR(j, u)) {
                     const int kR = posR_[j][u]++, kL = posL_[j + 1][v]++;
                     hR_[j][oR_[j][u] + kR]     = { v, kL };
                     hL_[j + 1][oL_[j + 1][v] + kL] = { u, kR };

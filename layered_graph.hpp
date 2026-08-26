@@ -3,19 +3,74 @@
 #include <filesystem>
 #include <unordered_map>
 #include <cctype>
+#include <span>
 struct LayeredGraph {
     int i = 0;
     vector<int> n;
-    vector<vector<vector<int>>> adjR;
-    vector<vector<vector<int>>> adjL;
+    // CSR adjacency, one flat array per layer: successors of (j,u) are
+    // nbrR[j][offR[j][u] .. offR[j][u+1]), predecessors nbrL[j][offL[j][u] .. offL[j][u+1]).
+    vector<vector<int>> offR, nbrR;
+    vector<vector<int>> offL, nbrL;
 
+    std::span<const int> outR(int j, int u) const {
+        return { nbrR[j].data() + offR[j][u], (size_t)(offR[j][u + 1] - offR[j][u]) };
+    }
+    std::span<const int> outL(int j, int u) const {
+        return { nbrL[j].data() + offL[j][u], (size_t)(offL[j][u + 1] - offL[j][u]) };
+    }
+    int degR(int j, int u) const { return offR[j][u + 1] - offR[j][u]; }
+    int degL(int j, int u) const { return offL[j][u + 1] - offL[j][u]; }
+    long long edgeCount() const {
+        long long e = 0;
+        for (int j = 0; j + 1 < i; ++j) e += offR[j][n[j]];
+        return e;
+    }
+
+    // --- construction: stage edges, then finalize() into CSR ---
+    vector<vector<std::pair<int,int>>> staged;   // per layer j: (u, v) in insertion order
+    void beginEdges() { staged.assign(i, {}); }
+    void addEdge(int j, int u, int v) { staged[j].push_back({ u, v }); }
+    // Stable counting sort: successors of u keep their insertion order, so the CSR
+    // reproduces the old per-vertex push_back order exactly.
+    void finalize() {
+        offR.assign(i, {}); nbrR.assign(i, {});
+        for (int j = 0; j < i; ++j) {
+            offR[j].assign(n[j] + 1, 0);
+            if (j + 1 < i) {
+                for (auto& e : staged[j]) ++offR[j][e.first + 1];
+                for (int u = 0; u < n[j]; ++u) offR[j][u + 1] += offR[j][u];
+                nbrR[j].resize(offR[j][n[j]]);
+                vector<int> cur(offR[j].begin(), offR[j].end() - 1);
+                for (auto& e : staged[j]) nbrR[j][cur[e.first]++] = e.second;
+            }
+        }
+        staged.clear(); staged.shrink_to_fit();
+        buildReverse();
+    }
+    // predecessors from successors, into existing buffers (grow-only, no per-vertex vectors)
     void buildReverse() {
-        adjL.assign(i, {});
-        for (int j = 0; j < i; ++j) adjL[j].assign(n[j], {});
+        auto grow = [](auto& v, size_t sz) { if (v.size() < sz) v.resize(sz); };
+        grow(offL, (size_t)i); grow(nbrL, (size_t)i);
+        for (int j = 0; j < i; ++j) {
+            grow(offL[j], (size_t)n[j] + 1);
+            std::fill(offL[j].begin(), offL[j].begin() + n[j] + 1, 0);
+        }
         for (int j = 0; j + 1 < i; ++j)
             for (int u = 0; u < n[j]; ++u)
-                for (int w : adjR[j][u]) adjL[j + 1][w].push_back(u);
+                for (int w : outR(j, u)) ++offL[j + 1][w + 1];
+        for (int j = 0; j < i; ++j) {
+            for (int u = 0; u < n[j]; ++u) offL[j][u + 1] += offL[j][u];
+            grow(nbrL[j], (size_t)offL[j][n[j]]);
+        }
+        for (int j = 1; j < i; ++j) {           // fill pass, cursor scratch reused across calls
+            revCursor_.assign(offL[j].begin(), offL[j].end() - 1);
+            for (int u = 0; u < n[j - 1]; ++u)
+                for (int w : outR(j - 1, u)) nbrL[j][revCursor_[w]++] = u;
+        }
     }
+private:
+    vector<int> revCursor_;
+public:
 };
 
 static std::expected<LayeredGraph, std::string>
@@ -27,8 +82,7 @@ readTypedEdgeList(std::istream& in) {
     for (int j = 0; j < g.i; ++j)
         if (!(in >> g.n[j]) || g.n[j] <= 0)
             return std::unexpected(std::format("error: bad layer size for type {}", j));
-    g.adjR.assign(g.i, {});
-    for (int j = 0; j < g.i; ++j) g.adjR[j].assign(g.n[j], {});
+    g.beginEdges();
     long long j, u, v;
     long long edges = 0;
     while (in >> j >> u >> v) {
@@ -38,10 +92,10 @@ readTypedEdgeList(std::istream& in) {
         if (u < 0 || u >= g.n[j] || v < 0 || v >= g.n[j + 1])
             return std::unexpected(std::format(
                 "error: vertex id out of range on edge ({},{},{})", j, u, v));
-        g.adjR[j][u].push_back((int)v);
+        g.addEdge((int)j, (int)u, (int)v);
         ++edges;
     }
-    g.buildReverse();
+    g.finalize();
     std::cerr << "read graph: i=" << g.i << ", |E|=" << edges << ", n=(";
     for (int t = 0; t < g.i; ++t)
         std::cerr << g.n[t] << (t + 1 < g.i ? "," : ")\n");
@@ -94,8 +148,7 @@ readQueryDir(const std::string& dir) {
         g.n[j] = (int)id[j].size();
         if (g.n[j] == 0) return std::unexpected(std::format("error: empty layer {} in {}", j, dir));
     }
-    g.adjR.assign(g.i, {});
-    for (int j = 0; j < g.i; ++j) g.adjR[j].assign(g.n[j], {});
+    g.beginEdges();
     long long edges = 0;
     for (auto& [k, path] : sfiles) {
         if (k < 0 || k + 1 >= g.i) continue;
@@ -107,12 +160,12 @@ readQueryDir(const std::string& dir) {
             std::istringstream ss(line);
             if (!(ss >> x >> y)) continue;
             auto ax = a.find(x), by = b.find(y);
-            if (ax != a.end() && by != b.end()) { g.adjR[k][ax->second].push_back(by->second); ++edges; continue; }
+            if (ax != a.end() && by != b.end()) { g.addEdge(k, ax->second, by->second); ++edges; continue; }
             auto ay = a.find(y), bx = b.find(x);
-            if (ay != a.end() && bx != b.end()) { g.adjR[k][ay->second].push_back(bx->second); ++edges; }
+            if (ay != a.end() && bx != b.end()) { g.addEdge(k, ay->second, bx->second); ++edges; }
         }
     }
-    g.buildReverse();
+    g.finalize();
     std::cerr << "read query dir: i=" << g.i << ", |E|=" << edges << ", n=(";
     for (int t = 0; t < g.i; ++t) std::cerr << g.n[t] << (t + 1 < g.i ? "," : ")\n");
     return g;
@@ -124,7 +177,7 @@ static long double totalInstances(const LayeredGraph& g) {
         vector<long double> nxt(g.n[j], 0.0L);
         for (int u = 0; u < g.n[j]; ++u) {
             long double s = 0;
-            for (int w : g.adjL[j][u]) s += cur[w];
+            for (int w : g.outL(j, u)) s += cur[w];
             nxt[u] = s;
         }
         cur.swap(nxt);

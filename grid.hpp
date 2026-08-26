@@ -70,11 +70,11 @@ static vector<long double> computeDelta(const LayeredGraph& g) {
     for (int u = 0; u < g.n[0]; ++u) L[0][u] = 1.0L;
     for (int j = 1; j < i; ++j)
         for (int u = 0; u < g.n[j]; ++u)
-            for (int w : g.adjL[j][u]) L[j][u] += L[j-1][w];
+            for (int w : g.outL(j, u)) L[j][u] += L[j-1][w];
     for (int u = 0; u < g.n[i-1]; ++u) R[i-1][u] = 1.0L;
     for (int j = i - 2; j >= 0; --j)
         for (int u = 0; u < g.n[j]; ++u)
-            for (int w : g.adjR[j][u]) R[j][u] += R[j+1][w];
+            for (int w : g.outR(j, u)) R[j][u] += R[j+1][w];
     vector<long double> Delta(i, 1.0L);
     for (int j = 0; j < i; ++j) {
         long double mx = 0.0L;

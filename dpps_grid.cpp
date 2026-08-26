@@ -9,7 +9,7 @@ static long long countInstancesExplicit(const LayeredGraph& g,
         vector<long double> nxt(g.n[j], 0);
         for (int u = 0; u < g.n[j]; ++u)
             if (in[j][u])
-                for (int w : g.adjL[j][u]) nxt[u] += cur[w];
+                for (int w : g.outL(j, u)) nxt[u] += cur[w];
         cur.swap(nxt);
     }
     long double s = 0;
@@ -46,12 +46,11 @@ static void runDemo() {
     {
         LayeredGraph g;
         g.i = 3; g.n = { 3, 3, 3 };
-        g.adjR.assign(3, {});
-        for (int j = 0; j < 3; ++j) g.adjR[j].assign(g.n[j], {});
-        auto E = [&](int j, int u, int v) { g.adjR[j][u].push_back(v); };
+        g.beginEdges();
+        auto E = [&](int j, int u, int v) { g.addEdge(j, u, v); };
         E(0,0,0); E(0,1,0); E(0,1,1); E(0,1,2); E(0,2,0); E(0,2,1);
         E(1,0,0); E(1,0,1); E(1,0,2); E(1,1,0); E(1,1,1); E(1,2,2);
-        g.buildReverse();
+        g.finalize();
         const double exact = bruteForceOptimum(g);
         for (double eta : { 0.5, 0.2, 0.05 }) {
             GridResult r = gridAlgorithm(g, eta);
@@ -68,15 +67,14 @@ static void runDemo() {
         std::mt19937 rng(7);
         LayeredGraph g;
         g.i = 4; g.n = { 14, 8, 5, 10 };
-        g.adjR.assign(4, {});
-        for (int j = 0; j < 4; ++j) g.adjR[j].assign(g.n[j], {});
+        g.beginEdges();
         const double p[3] = { 0.25, 0.4, 0.3 };
         std::uniform_real_distribution<double> U(0, 1);
         for (int j = 0; j < 3; ++j)
             for (int u = 0; u < g.n[j]; ++u)
                 for (int v = 0; v < g.n[j + 1]; ++v)
-                    if (U(rng) < p[j]) g.adjR[j][u].push_back(v);
-        g.buildReverse();
+                    if (U(rng) < p[j]) g.addEdge(j, u, v);
+        g.finalize();
         GridResult r = gridAlgorithm(g, 0.5);
         std::printf("[demo i=4] eta=0.50  rho=%.4f  sizes=(", r.rho);
         for (int j = 0; j < 4; ++j)
@@ -112,13 +110,12 @@ static void runDemo() {
     }
     {
         LayeredGraph g; g.i = 3; g.n = { 4, 4, 4 };
-        g.adjR.assign(3, {});
-        for (int j = 0; j < 3; ++j) g.adjR[j].assign(g.n[j], {});
-        auto E = [&](int j, int u, int v) { g.adjR[j][u].push_back(v); };
+        g.beginEdges();
+        auto E = [&](int j, int u, int v) { g.addEdge(j, u, v); };
         E(0,0,1); E(0,1,3); E(0,3,0); E(0,3,2); E(0,3,3);
         E(1,0,0); E(1,0,2); E(1,0,3); E(1,1,0); E(1,1,3);
         E(1,2,1); E(1,2,2); E(1,3,0); E(1,3,3);
-        g.buildReverse();
+        g.finalize();
         const double exact = bruteForceOptimum(g);
         std::printf("[near-opt i=3] exact rho* = %.4f; ratio by pass count "
                     "(eta=0.3):\n", exact);
