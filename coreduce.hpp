@@ -75,13 +75,6 @@ static ReduceStats coReduce(const LayeredGraph& g, const vector<double>& M,
     return st;
 }
 
-static double distFromBalanced(const vector<double>& M) {
-    return std::ranges::fold_left(M, 0.0, [](double s, double m) {
-        double x = std::log(m);
-        return s + x * x;
-    });
-}
-
 struct TraceRec { size_t step; double rhoHat; bool solved; double cellRho; };
 
 struct PruneAgg {

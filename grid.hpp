@@ -148,19 +148,69 @@ static void deltaBox(const LayeredGraph& g, double  , double rhoHat,
     for (int j = 0; j < i; ++j) boxLo[j] = std::max(-(sumHi - boxHi[j]), -lnDmax);
 }
 
-// Adaptive Delta-box test (Sec 5.4): does representative M survive the box tightened to
-// the current incumbent?  A one-pitch margin per axis keeps the cell of m* (zero-sum
+// Adaptive Delta-box (Sec 5.4).  All state is sized once in init(); per cell the test is
+// i comparisons on precomputed log-coordinates, and the box is recomputed only when the
+// incumbent actually moves.  A one-pitch margin per axis keeps the cell of m* (zero-sum
 // rounding moves every coordinate by at most one step, Lemma zero-sum rounding).
-static bool cellInDeltaBox(const vector<double>& M, const LayeredGraph& g, double rhoHat,
-                           const vector<long double>& Delta, double step,
-                           vector<double>& lo, vector<double>& hi) {
-    deltaBox(g, 0.0, rhoHat, Delta, lo, hi);
-    const double tol = step + 1e-9;
-    for (size_t j = 0; j < M.size(); ++j) {
-        const double x = std::log(M[j]);
-        if (x > hi[j] + tol || x < lo[j] - tol) return false;
+struct AdaptiveBox {
+    int i = 0;
+    double tol = 0.0, lnDmax = 0.0, rhoCur = -1.0;
+    vector<double> lnDelta, hi, lo;   // per axis
+    vector<double> lnGrid;            // cell-major log-coordinates, i per cell
+
+    void init(const vector<vector<double>>& grid, const vector<long double>& Delta, double step) {
+        i = (int)Delta.size();
+        tol = step + 1e-9;
+        lnDelta.resize(i); hi.resize(i); lo.resize(i);
+        lnDmax = 0.0;
+        for (int j = 0; j < i; ++j) { lnDelta[j] = std::log((double)Delta[j]); lnDmax = std::max(lnDmax, lnDelta[j]); }
+        lnGrid.resize(grid.size() * (size_t)i);
+        for (size_t c = 0; c < grid.size(); ++c)
+            for (int j = 0; j < i; ++j) lnGrid[c * i + j] = std::log(grid[c][j]);
+        rhoCur = -1.0;
     }
-    return true;
+    // reorder the cached log-coordinates to match a permutation applied to the grid
+    void permute(const vector<int>& perm, vector<double>& scratch) {
+        scratch.resize(lnGrid.size());
+        for (size_t c = 0; c < perm.size(); ++c)
+            std::copy_n(lnGrid.begin() + (size_t)perm[c] * i, i, scratch.begin() + c * i);
+        lnGrid.swap(scratch);
+    }
+    inline void tighten(double rho) {
+        if (rho <= rhoCur) return;            // box only shrinks; nothing to redo
+        rhoCur = rho;
+        const double lr = std::log(std::max(rho, 1e-12));
+        double sumHi = 0.0;
+        for (int j = 0; j < i; ++j) { hi[j] = std::max(0.0, lnDelta[j] - lr); sumHi += hi[j]; }
+        for (int j = 0; j < i; ++j) lo[j] = std::max(-(sumHi - hi[j]), -lnDmax);
+    }
+    inline bool contains(size_t cell) const {
+        const double* x = lnGrid.data() + cell * i;
+        for (int j = 0; j < i; ++j)
+            if (x[j] > hi[j] + tol || x[j] < lo[j] - tol) return false;
+        return true;
+    }
+    inline bool keep(size_t cell, double rho) { tighten(rho); return contains(cell); }
+};
+
+// best-first order: nearest-balanced cells first.  One key array, one index sort, one
+// in-place permutation -- no per-comparison logs and no per-cell vector copies.
+static void sortGridBestFirst(vector<vector<double>>& grid, vector<int>& perm,
+                              vector<double>& key, AdaptiveBox* box = nullptr,
+                              vector<double>* scratch = nullptr) {
+    const size_t n = grid.size();
+    key.resize(n); perm.resize(n);
+    for (size_t c = 0; c < n; ++c) {
+        double s = 0.0;
+        for (double m : grid[c]) { const double x = std::log(m); s += x * x; }
+        key[c] = s; perm[c] = (int)c;
+    }
+    std::sort(perm.begin(), perm.end(), [&](int a, int b) { return key[a] < key[b]; });
+    // apply the permutation by swapping vector buffers (moves, no element copies)
+    vector<vector<double>> tmp(n);
+    for (size_t c = 0; c < n; ++c) tmp[c] = std::move(grid[perm[c]]);
+    grid.swap(tmp);
+    if (box && scratch) box->permute(perm, *scratch);
 }
 
 static vector<vector<double>> buildGrid(const LayeredGraph& g, double eta,

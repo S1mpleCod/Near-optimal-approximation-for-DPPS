@@ -14,22 +14,42 @@ public:
     void init(const LayeredGraph& g) {
         i_ = g.i; n_ = g.n;
         auto grow = [](auto& v, size_t sz) { if (v.size() < sz) v.resize(sz); };
-        grow(nR_, i_); grow(nL_, i_); grow(posR_, i_); grow(posL_, i_);
+        grow(hR_, i_); grow(hL_, i_); grow(oR_, i_); grow(oL_, i_); grow(posR_, i_); grow(posL_, i_);
         grow(alive_, i_); grow(L_, i_); grow(R_, i_); grow(dbuf_, i_); grow(touched_, i_);
         off_.assign(i_ + 1, 0);
+        // CSR adjacency: one contiguous Half array per layer, offsets oR_/oL_ (size n+1).
+        // Built in two counting passes -- no per-vertex heap vectors.
         for (int j = 0; j < i_; ++j) {
-            grow(nR_[j], (size_t)n_[j]); grow(nL_[j], (size_t)n_[j]);
-            for (int u = 0; u < n_[j]; ++u) { nR_[j][u].clear(); nL_[j][u].clear(); }
+            grow(oR_[j], (size_t)n_[j] + 1); grow(oL_[j], (size_t)n_[j] + 1);
+            grow(posR_[j], (size_t)n_[j]);   grow(posL_[j], (size_t)n_[j]);
+            std::fill(oR_[j].begin(), oR_[j].begin() + n_[j] + 1, 0);
+            std::fill(oL_[j].begin(), oL_[j].begin() + n_[j] + 1, 0);
             off_[j + 1] = off_[j] + n_[j];
+        }
+        for (int j = 0; j + 1 < i_; ++j)
+            for (int u = 0; u < n_[j]; ++u) {
+                oR_[j][u + 1] += (int)g.adjR[j][u].size();
+                for (int v : g.adjR[j][u]) ++oL_[j + 1][v + 1];
+            }
+        for (int j = 0; j < i_; ++j) {
+            for (int u = 0; u < n_[j]; ++u) { oR_[j][u + 1] += oR_[j][u]; oL_[j][u + 1] += oL_[j][u]; }
+            grow(hR_[j], (size_t)oR_[j][n_[j]]); grow(hL_[j], (size_t)oL_[j][n_[j]]);
+            std::fill(posR_[j].begin(), posR_[j].begin() + n_[j], 0);   // fill cursors
+            std::fill(posL_[j].begin(), posL_[j].begin() + n_[j], 0);
         }
         for (int j = 0; j + 1 < i_; ++j)
             for (int u = 0; u < n_[j]; ++u)
                 for (int v : g.adjR[j][u]) {
-                    nR_[j][u].push_back({ v, (int)nL_[j + 1][v].size() });
-                    nL_[j + 1][v].push_back({ u, (int)nR_[j][u].size() - 1 });
+                    const int kR = posR_[j][u]++, kL = posL_[j + 1][v]++;
+                    hR_[j][oR_[j][u] + kR]     = { v, kL };
+                    hL_[j + 1][oL_[j + 1][v] + kL] = { u, kR };
                 }
+        grow(hR0_, i_); grow(hL0_, i_);   // pristine copies, restored per cell by rebind()
         for (int j = 0; j < i_; ++j) {
-            grow(posR_[j], (size_t)n_[j]); grow(posL_[j], (size_t)n_[j]);
+            hR0_[j].assign(hR_[j].begin(), hR_[j].begin() + oR_[j][n_[j]]);
+            hL0_[j].assign(hL_[j].begin(), hL_[j].begin() + oL_[j][n_[j]]);
+        }
+        for (int j = 0; j < i_; ++j) {
             grow(alive_[j], (size_t)n_[j]); grow(L_[j], (size_t)n_[j]);
             grow(R_[j], (size_t)n_[j]);     grow(dbuf_[j], (size_t)n_[j]);
             std::fill(dbuf_[j].begin(), dbuf_[j].begin() + n_[j], 0.0L);
@@ -42,6 +62,16 @@ public:
         deleted_.reserve(N);
         grow(kept_, (size_t)i_);
         for (int j = 0; j < i_; ++j) grow(kept_[j], (size_t)n_[j]);
+    }
+
+    // Restore the pristine edge order for a new cell on the same graph: compaction only
+    // permutes within each vertex's segment, so two flat copies (no allocation) put every
+    // cell back to the state init() left, exactly as a full rebuild would.
+    void rebind() {
+        for (int j = 0; j < i_; ++j) {
+            std::copy(hR0_[j].begin(), hR0_[j].begin() + oR_[j][n_[j]], hR_[j].begin());
+            std::copy(hL0_[j].begin(), hL0_[j].begin() + oL_[j][n_[j]], hL_[j].begin());
+        }
     }
 
     PeelResult runPasses(const vector<double>& M, int T) {
@@ -118,13 +148,13 @@ public:
         mv_.assign(N, 1.0L);
         for (int j = 0; j < i_; ++j)
             for (int u = 0; u < n_[j]; ++u) mv_[off_[j] + u] = (long double)M[j];
-        std::vector<std::vector<long double>> atoms;
-        std::vector<long double> alpha;
-        std::vector<long double> x(N, 0.0L), z(N, 0.0L), sBuf(N, 0.0L);
+        atomsReset();
+        auto& x = fwX_; auto& z = fwZ_; auto& sBuf = fwS_;
+        x.assign(N, 0.0L); z.assign(N, 0.0L); sBuf.assign(N, 0.0L);
         double bestRho = -1.0; long double bestHm = -1.0L;
         bestDeleted_.clear();
         onePassFW(M, z, sBuf, bestRho, bestHm);
-        atoms.push_back(sBuf); alpha.push_back(1.0L); x = sBuf;
+        atomAdd(sBuf, 1.0L); x.assign(sBuf.begin(), sBuf.end());
         int t = 0;
         while (t < Tmax) {
             ++t;
@@ -132,8 +162,8 @@ public:
             std::fill(sBuf.begin(), sBuf.end(), 0.0L);
             onePassFW(M, z, sBuf, bestRho, bestHm);
             int a = 0; long double amax = -1e300L;
-            for (size_t k = 0; k < atoms.size(); ++k) {
-                long double dp = 0.0L; const auto& A = atoms[k];
+            for (size_t k = 0; k < nAtoms_; ++k) {
+                long double dp = 0.0L; const auto& A = fwAtoms_[k];
                 for (int v = 0; v < N; ++v) dp += z[v] * A[v];
                 if (dp > amax) { amax = dp; a = (int)k; }
             }
@@ -141,17 +171,15 @@ public:
             for (int v = 0; v < N; ++v) zsFW += z[v] * sBuf[v];
             long double num = amax - zsFW;
             long double den = 0.0L;
-            for (int v = 0; v < N; ++v) { long double dv = sBuf[v] - atoms[a][v]; den += dv * dv / mv_[v]; }
+            const auto& Aa = fwAtoms_[a];
+            for (int v = 0; v < N; ++v) { long double dv = sBuf[v] - Aa[v]; den += dv * dv / mv_[v]; }
             long double gamma = den > 0.0L ? num / den : 0.0L;
             if (gamma < 0.0L) gamma = 0.0L;
-            if (gamma > alpha[a]) gamma = alpha[a];
-            for (int v = 0; v < N; ++v) x[v] += gamma * (sBuf[v] - atoms[a][v]);
-            alpha[a] -= gamma;
-            atoms.push_back(sBuf); alpha.push_back(gamma);
-            size_t w = 0;
-            for (size_t k = 0; k < atoms.size(); ++k)
-                if (alpha[k] > 1e-15L) { if (w != k) { atoms[w].swap(atoms[k]); alpha[w] = alpha[k]; } ++w; }
-            atoms.resize(w); alpha.resize(w);
+            if (gamma > fwAlpha_[a]) gamma = fwAlpha_[a];
+            for (int v = 0; v < N; ++v) x[v] += gamma * (sBuf[v] - Aa[v]);
+            fwAlpha_[a] -= gamma;
+            atomAdd(sBuf, gamma);
+            atomsCompact();
             long double U = 0.0L;
             for (int v = 0; v < N; ++v) U = std::max(U, x[v] / mv_[v]);
             if (rhoIncumbent > 0.0 &&
@@ -160,7 +188,6 @@ public:
             if (deadline::hit()) break;
         }
         if (used) *used = t;
-        fwX_.assign(x.begin(), x.end());
         PeelResult res; res.rho = bestRho;
         return res;
     }
@@ -172,7 +199,8 @@ public:
         mv_.assign(N, 1.0L);
         for (int j = 0; j < i_; ++j)
             for (int u = 0; u < n_[j]; ++u) mv_[off_[j] + u] = (long double)M[j];
-        std::vector<long double> x(warm), z(N, 0.0L), sBuf(N, 0.0L);
+        auto& x = fwX_; auto& z = fwZ_; auto& sBuf = fwS_;
+        x.assign(warm.begin(), warm.end()); z.assign(N, 0.0L); sBuf.assign(N, 0.0L);
         double bestRho = -1.0; long double bestHm = -1.0L;
         bestDeleted_.clear();
         int t = 0;
@@ -196,7 +224,6 @@ public:
             if (deadline::hit()) break;
         }
         if (used) *used = t;
-        fwX_.assign(x.begin(), x.end());
         PeelResult res; res.rho = bestRho;
         return res;
     }
@@ -213,18 +240,17 @@ public:
         double bestRho = -1.0; long double bestHm = -1.0L;
         bestDeleted_.clear();
         auto finish = [&](int t) { if (used) *used = t; PeelResult res; res.rho = bestRho; return res; };
-        std::vector<std::vector<long double>> atoms;
-        std::vector<long double> alpha;
-        std::vector<long double> prev(N, 0.0L);
+        atomsReset();
+        auto& prev = fwPrev_; auto& b = fwS_;
+        prev.assign(N, 0.0L); b.assign(N, 0.0L);
         const int k0 = std::max(1, std::min((int)kWarmPeel, Tmax));
         int t = 0;
         for (; t < k0; ++t) {
             PassRes r = onePass(M);
             if (r.rho > bestRho) { bestRho = r.rho; bestDeleted_.assign(deleted_.begin(), deleted_.begin() + r.prefix); }
             if (r.hm > bestHm) bestHm = r.hm;
-            std::vector<long double> b(N);
             for (int v = 0; v < N; ++v) { b[v] = (load_[v] - prev[v]) * mv_[v]; prev[v] = load_[v]; }
-            atoms.push_back(std::move(b)); alpha.push_back(0.0L);
+            atomAdd(b, 0.0L);
             long double dual = 0.0L;
             for (int v = 0; v < N; ++v) dual = std::max(dual, load_[v] / (long double)(t + 1));
             if (rhoIncumbent > 0.0 &&
@@ -232,8 +258,9 @@ public:
             if (bestHm > 0.0L && (1.0L - (long double)delta) * dual <= bestHm) { fwX_.assign(N, 0.0L); return finish(t + 1); }
             if (deadline::hit()) { fwX_.assign(N, 0.0L); return finish(t + 1); }
         }
-        for (auto& a : alpha) a = 1.0L / (long double)atoms.size();
-        std::vector<long double> x(N), z(N, 0.0L), sBuf(N, 0.0L);
+        for (auto& a : fwAlpha_) a = 1.0L / (long double)nAtoms_;
+        auto& x = fwX_; auto& z = fwZ_; auto& sBuf = fwS_;
+        x.assign(N, 0.0L); z.assign(N, 0.0L); sBuf.assign(N, 0.0L);
         for (int v = 0; v < N; ++v) x[v] = load_[v] * mv_[v] / (long double)t;
         while (t < Tmax) {
             ++t;
@@ -241,8 +268,8 @@ public:
             std::fill(sBuf.begin(), sBuf.end(), 0.0L);
             onePassFW(M, z, sBuf, bestRho, bestHm);
             int a = 0; long double amax = -1e300L;
-            for (size_t k = 0; k < atoms.size(); ++k) {
-                long double dp = 0.0L; const auto& A = atoms[k];
+            for (size_t k = 0; k < nAtoms_; ++k) {
+                long double dp = 0.0L; const auto& A = fwAtoms_[k];
                 for (int v = 0; v < N; ++v) dp += z[v] * A[v];
                 if (dp > amax) { amax = dp; a = (int)k; }
             }
@@ -250,17 +277,15 @@ public:
             for (int v = 0; v < N; ++v) zsFW += z[v] * sBuf[v];
             long double num = amax - zsFW;
             long double den = 0.0L;
-            for (int v = 0; v < N; ++v) { long double dv = sBuf[v] - atoms[a][v]; den += dv * dv / mv_[v]; }
+            const auto& Aa = fwAtoms_[a];
+            for (int v = 0; v < N; ++v) { long double dv = sBuf[v] - Aa[v]; den += dv * dv / mv_[v]; }
             long double gamma = den > 0.0L ? num / den : 0.0L;
             if (gamma < 0.0L) gamma = 0.0L;
-            if (gamma > alpha[a]) gamma = alpha[a];
-            for (int v = 0; v < N; ++v) x[v] += gamma * (sBuf[v] - atoms[a][v]);
-            alpha[a] -= gamma;
-            atoms.push_back(sBuf); alpha.push_back(gamma);
-            size_t w = 0;
-            for (size_t k = 0; k < atoms.size(); ++k)
-                if (alpha[k] > 1e-15L) { if (w != k) { atoms[w].swap(atoms[k]); alpha[w] = alpha[k]; } ++w; }
-            atoms.resize(w); alpha.resize(w);
+            if (gamma > fwAlpha_[a]) gamma = fwAlpha_[a];
+            for (int v = 0; v < N; ++v) x[v] += gamma * (sBuf[v] - Aa[v]);
+            fwAlpha_[a] -= gamma;
+            atomAdd(sBuf, gamma);
+            atomsCompact();
             long double U = 0.0L;
             for (int v = 0; v < N; ++v) U = std::max(U, x[v] / mv_[v]);
             if (rhoIncumbent > 0.0 &&
@@ -269,7 +294,6 @@ public:
             if (num <= 1e-15L) break;
             if (deadline::hit()) break;
         }
-        fwX_.assign(x.begin(), x.end());
         return finish(t);
     }
 
@@ -344,8 +368,18 @@ private:
     int i_;
     vector<int> n_;
     vector<int> off_;
-    vector<vector<vector<Half>>> nR_, nL_;
-    vector<vector<int>> posR_, posL_;
+    vector<vector<Half>> hR_, hL_;     // CSR halves per layer
+    vector<vector<Half>> hR0_, hL0_;   // pristine order (see rebind)
+    vector<vector<int>>  oR_, oL_;     // CSR offsets per layer (n_j + 1 entries)
+    vector<vector<int>>  posR_, posL_; // live prefix length of each vertex's segment
+    inline int degR(int j, int u) const { return oR_[j][u + 1] - oR_[j][u]; }
+    inline int degL(int j, int u) const { return oL_[j][u + 1] - oL_[j][u]; }
+    inline Half*       segR(int j, int u)       { return hR_[j].data() + oR_[j][u]; }
+    inline Half*       segL(int j, int u)       { return hL_[j].data() + oL_[j][u]; }
+    inline Half&       nR(int j, int u, int k)       { return hR_[j][oR_[j][u] + k]; }
+    inline const Half& nR(int j, int u, int k) const { return hR_[j][oR_[j][u] + k]; }
+    inline Half&       nL(int j, int u, int k)       { return hL_[j][oL_[j][u] + k]; }
+    inline const Half& nL(int j, int u, int k) const { return hL_[j][oL_[j][u] + k]; }
     vector<vector<char>> alive_;
     vector<vector<long double>> L_, R_;
     vector<vector<long double>> dbuf_;
@@ -355,6 +389,24 @@ private:
     vector<int> order_;
     vector<long double> mv_;
     vector<long double> fwX_;
+    // Frank-Wolfe scratch, sized once per graph and reused across cells and passes
+    vector<long double> fwZ_, fwS_, fwPrev_;
+    vector<vector<long double>> fwAtoms_;   // buffer pool; only the first nAtoms_ are live
+    vector<long double> fwAlpha_;
+    size_t nAtoms_ = 0;
+
+    inline void atomsReset() { nAtoms_ = 0; fwAlpha_.clear(); }
+    inline void atomAdd(const vector<long double>& src, long double a) {
+        if (nAtoms_ == fwAtoms_.size()) fwAtoms_.emplace_back();
+        fwAtoms_[nAtoms_].assign(src.begin(), src.end());   // reuses the buffer's capacity
+        fwAlpha_.push_back(a); ++nAtoms_;
+    }
+    inline void atomsCompact() {   // drop atoms with vanishing weight; buffers stay in the pool
+        size_t w = 0;
+        for (size_t k = 0; k < nAtoms_; ++k)
+            if (fwAlpha_[k] > 1e-15L) { if (w != k) { fwAtoms_[w].swap(fwAtoms_[k]); fwAlpha_[w] = fwAlpha_[k]; } ++w; }
+        nAtoms_ = w; fwAlpha_.resize(w);
+    }
     vector<int> sizes_;
     vector<std::pair<int,int>> deleted_;
     vector<std::pair<int,int>> bestDeleted_;
@@ -432,8 +484,8 @@ private:
         for (int j = 0; j < i_; ++j) {
             std::fill(alive_[j].begin(), alive_[j].begin() + n_[j], (char)1);
             for (int u = 0; u < n_[j]; ++u) {
-                posR_[j][u] = (int)nR_[j][u].size();
-                posL_[j][u] = (int)nL_[j][u].size();
+                posR_[j][u] = degR(j, u);
+                posL_[j][u] = degL(j, u);
             }
             std::fill(L_[j].begin(), L_[j].begin() + n_[j], 0);
             std::fill(R_[j].begin(), R_[j].begin() + n_[j], 0);
@@ -443,35 +495,41 @@ private:
         for (int u = 0; u < n_[0]; ++u) L_[0][u] = 1;
         for (int j = 1; j < i_; ++j)
             for (int u = 0; u < n_[j]; ++u)
-                for (int k = 0; k < posL_[j][u]; ++k)
-                    L_[j][u] += L_[j - 1][nL_[j][u][k].v];
+            {
+                const Half* seg = segL(j, u); const int p = posL_[j][u];
+                long double acc = 0;
+                for (int k = 0; k < p; ++k) acc += L_[j - 1][seg[k].v];
+                L_[j][u] += acc;
+            }
         for (int u = 0; u < n_[i_ - 1]; ++u) R_[i_ - 1][u] = 1;
         for (int j = i_ - 2; j >= 0; --j)
             for (int u = 0; u < n_[j]; ++u)
-                for (int k = 0; k < posR_[j][u]; ++k)
-                    R_[j][u] += R_[j + 1][nR_[j][u][k].v];
+            {
+                const Half* seg = segR(j, u); const int p = posR_[j][u];
+                long double acc = 0;
+                for (int k = 0; k < p; ++k) acc += R_[j + 1][seg[k].v];
+                R_[j][u] += acc;
+            }
     }
 
     inline void compactL(int jw, int w, int at) {
         int& p = posL_[jw][w];
         --p;
         if (at != p) {
-            std::swap(nL_[jw][w][at], nL_[jw][w][p]);
-            const Half a = nL_[jw][w][at];
-            nR_[jw - 1][a.v][a.m].m = at;
-            const Half b = nL_[jw][w][p];
-            nR_[jw - 1][b.v][b.m].m = p;
+            Half* seg = segL(jw, w);
+            std::swap(seg[at], seg[p]);
+            const Half a = seg[at]; segR(jw - 1, a.v)[a.m].m = at;
+            const Half b = seg[p];  segR(jw - 1, b.v)[b.m].m = p;
         }
     }
     inline void compactR(int jw, int w, int at) {
         int& p = posR_[jw][w];
         --p;
         if (at != p) {
-            std::swap(nR_[jw][w][at], nR_[jw][w][p]);
-            const Half a = nR_[jw][w][at];
-            nL_[jw + 1][a.v][a.m].m = at;
-            const Half b = nR_[jw][w][p];
-            nL_[jw + 1][b.v][b.m].m = p;
+            Half* seg = segR(jw, w);
+            std::swap(seg[at], seg[p]);
+            const Half a = seg[at]; segL(jw + 1, a.v)[a.m].m = at;
+            const Half b = seg[p];  segL(jw + 1, b.v)[b.m].m = p;
         }
     }
 
@@ -508,8 +566,9 @@ private:
                                const vector<long double>& load) {
         if (j + 1 < i_) {
             const long double dl = L_[j][u];
-            for (int k = 0; k < posR_[j][u]; ++k) {
-                const Half e = nR_[j][u][k];
+            const Half* segU = segR(j, u); const int pu = posR_[j][u];
+            for (int k = 0; k < pu; ++k) {
+                const Half e = segU[k];
                 if (dl > 0) addDelta(j + 1, e.v, dl);
                 compactL(j + 1, e.v, e.m);
             }
@@ -522,8 +581,10 @@ private:
                         decreaseKey(off_[jj] + w,
                                     (load[off_[jj]+w] + cnt(jj,w)) / (long double)M[jj]);
                     if (jj + 1 < i_)
-                        for (int k = 0; k < posR_[jj][w]; ++k)
-                            addDelta(jj + 1, nR_[jj][w][k].v, d);
+                    {
+                        const Half* seg = segR(jj, w); const int p = posR_[jj][w];
+                        for (int k = 0; k < p; ++k) addDelta(jj + 1, seg[k].v, d);
+                    }
                     dbuf_[jj][w] = 0;
                 }
                 touched_[jj].clear();
@@ -531,8 +592,9 @@ private:
         }
         if (j - 1 >= 0) {
             const long double dr = R_[j][u];
-            for (int k = 0; k < posL_[j][u]; ++k) {
-                const Half e = nL_[j][u][k];
+            const Half* segU = segL(j, u); const int pu = posL_[j][u];
+            for (int k = 0; k < pu; ++k) {
+                const Half e = segU[k];
                 if (dr > 0) addDelta(j - 1, e.v, dr);
                 compactR(j - 1, e.v, e.m);
             }
@@ -545,8 +607,10 @@ private:
                         decreaseKey(off_[jj] + w,
                                     (load[off_[jj]+w] + cnt(jj,w)) / (long double)M[jj]);
                     if (jj - 1 >= 0)
-                        for (int k = 0; k < posL_[jj][w]; ++k)
-                            addDelta(jj - 1, nL_[jj][w][k].v, d);
+                    {
+                        const Half* seg = segL(jj, w); const int p = posL_[jj][w];
+                        for (int k = 0; k < p; ++k) addDelta(jj - 1, seg[k].v, d);
+                    }
                     dbuf_[jj][w] = 0;
                 }
                 touched_[jj].clear();
@@ -562,8 +626,9 @@ private:
     void detachAndPropagateNoKey(int j, int u) {
         if (j + 1 < i_) {
             const long double dl = L_[j][u];
-            for (int k = 0; k < posR_[j][u]; ++k) {
-                const Half e = nR_[j][u][k];
+            const Half* segU = segR(j, u); const int pu = posR_[j][u];
+            for (int k = 0; k < pu; ++k) {
+                const Half e = segU[k];
                 if (dl > 0) addDelta(j + 1, e.v, dl);
                 compactL(j + 1, e.v, e.m);
             }
@@ -573,8 +638,10 @@ private:
                     const long double d = dbuf_[jj][w];
                     L_[jj][w] -= d;
                     if (jj + 1 < i_)
-                        for (int k = 0; k < posR_[jj][w]; ++k)
-                            addDelta(jj + 1, nR_[jj][w][k].v, d);
+                    {
+                        const Half* seg = segR(jj, w); const int p = posR_[jj][w];
+                        for (int k = 0; k < p; ++k) addDelta(jj + 1, seg[k].v, d);
+                    }
                     dbuf_[jj][w] = 0;
                 }
                 touched_[jj].clear();
@@ -582,8 +649,9 @@ private:
         }
         if (j - 1 >= 0) {
             const long double dr = R_[j][u];
-            for (int k = 0; k < posL_[j][u]; ++k) {
-                const Half e = nL_[j][u][k];
+            const Half* segU = segL(j, u); const int pu = posL_[j][u];
+            for (int k = 0; k < pu; ++k) {
+                const Half e = segU[k];
                 if (dr > 0) addDelta(j - 1, e.v, dr);
                 compactR(j - 1, e.v, e.m);
             }
@@ -593,8 +661,10 @@ private:
                     const long double d = dbuf_[jj][w];
                     R_[jj][w] -= d;
                     if (jj - 1 >= 0)
-                        for (int k = 0; k < posL_[jj][w]; ++k)
-                            addDelta(jj - 1, nL_[jj][w][k].v, d);
+                    {
+                        const Half* seg = segL(jj, w); const int p = posL_[jj][w];
+                        for (int k = 0; k < p; ++k) addDelta(jj - 1, seg[k].v, d);
+                    }
                     dbuf_[jj][w] = 0;
                 }
                 touched_[jj].clear();
