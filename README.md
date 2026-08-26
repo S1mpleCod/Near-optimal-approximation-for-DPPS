@@ -28,7 +28,7 @@ has zero codegen/perf impact.
 |---|---|---|
 | `dpss_common.hpp` | includes, allocation counter (`--alloc`), deadline cutoff | — |
 | `layered_graph.hpp` | `LayeredGraph`, typed-edge / query-directory readers, L·R instance DP | §6 instance-free solver |
-| `grid.hpp` | η-net builders: first/second-order nets, Δ-box localization | §5 covering |
+| `grid.hpp` | η-net builders: first/second-order nets, Δ-box localization, adaptive Δ-box cell test | §5 covering |
 | `peeler.hpp` | `Peeler`: 1/i peel, near-opt iterative peeling, dual-gap certificate (Frank–Wolfe), certified peeling | §6 cell solver |
 | `config.hpp` | flags/globals, uniform pass budget T, `GridResult` | — |
 | `coreduce.hpp` | co-reduction: per-type incidence-floor vertex pruning + cell drops | §7 pruning |
@@ -80,6 +80,11 @@ eta                 positional, after the input path (e.g. ./dpps_grid <input> 0
 --passes=T          T>0 fixed peeling passes (T=1 = the prior 1/i peel); T<=0 near-optimal
 --grid=1|2          first- or second-order eta-net (second-order = sqrt(2*eta/e) spacing)
 --deltabox / --no-deltabox   Delta-box localization of the net (Lemma "deltabox")
+--adaptive-box / --no-adaptive-box
+                    re-tighten the Delta-box to the growing incumbent rho_hat
+                    (rho* in [rho_hat, Delta], Sec 5.4) and skip cells that leave it,
+                    with a one-pitch margin so the optimum's cell is always kept;
+                    cells are swept nearest-balanced first (default on)
 --prune | --prune-oracle     co-reduction: incidence-floor vertex pruning, incumbent-driven
 --delta=d           solver tolerance delta (solver factor beta = 1-delta)
 --certify           certified mode: min-norm / pairwise Frank-Wolfe engine proving

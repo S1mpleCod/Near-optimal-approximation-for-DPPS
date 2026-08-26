@@ -53,9 +53,15 @@ static vector<double> roundAndProject(const vector<double>& mStar, double eta) {
 }
 
 struct GridMode {
-    int  order    = 2;
-    bool deltaBox = true;
+    int  order       = 2;
+    bool deltaBox    = true;
+    bool adaptiveBox = true;   // re-tighten the Delta-box as the incumbent grows (Sec 5.4)
 };
+
+// lattice pitch in log-coordinates: first-order ln(1+eta), second-order sqrt(2 eta / e)
+static inline double gridStep(double eta, int order) {
+    return order == 1 ? std::log1p(eta) : std::sqrt(2.0 * eta / std::exp(1.0));
+}
 
 static vector<long double> computeDelta(const LayeredGraph& g) {
     const int i = g.i;
@@ -123,19 +129,38 @@ static vector<vector<double>> irmGridSecondOrder(
     return grid;
 }
 
+// Delta-box at incumbent rhoHat (Lemma deltabox): ln m*_j <= ln Delta_j - ln rhoHat, and
+// ln m*_j >= max(-sum_{k!=j} hi_k, -ln Delta)  (product-one, and m*_j >= 1/rho* >= 1/Delta).
+// Only the bracket rho* in [rhoHat, Delta] enters, so the box always contains m*.
 static void deltaBox(const LayeredGraph& g, double  , double rhoHat,
                      const vector<long double>& Delta,
                      vector<double>& boxLo, vector<double>& boxHi) {
     const int i = g.i;
     boxLo.assign(i, 0.0); boxHi.assign(i, 0.0);
     const double lr = std::log(std::max(rhoHat, 1e-12));
-    double sumHi = 0.0;
+    double sumHi = 0.0, lnDmax = 0.0;
     for (int j = 0; j < i; ++j) {
         boxHi[j] = std::log((double)Delta[j]) - lr;
         if (boxHi[j] < 0) boxHi[j] = 0;
         sumHi += boxHi[j];
+        lnDmax = std::max(lnDmax, std::log((double)Delta[j]));
     }
-    for (int j = 0; j < i; ++j) boxLo[j] = -sumHi;
+    for (int j = 0; j < i; ++j) boxLo[j] = std::max(-(sumHi - boxHi[j]), -lnDmax);
+}
+
+// Adaptive Delta-box test (Sec 5.4): does representative M survive the box tightened to
+// the current incumbent?  A one-pitch margin per axis keeps the cell of m* (zero-sum
+// rounding moves every coordinate by at most one step, Lemma zero-sum rounding).
+static bool cellInDeltaBox(const vector<double>& M, const LayeredGraph& g, double rhoHat,
+                           const vector<long double>& Delta, double step,
+                           vector<double>& lo, vector<double>& hi) {
+    deltaBox(g, 0.0, rhoHat, Delta, lo, hi);
+    const double tol = step + 1e-9;
+    for (size_t j = 0; j < M.size(); ++j) {
+        const double x = std::log(M[j]);
+        if (x > hi[j] + tol || x < lo[j] - tol) return false;
+    }
+    return true;
 }
 
 static vector<vector<double>> buildGrid(const LayeredGraph& g, double eta,

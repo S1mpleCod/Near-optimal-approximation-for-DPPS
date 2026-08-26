@@ -17,10 +17,18 @@ static GridResult gridAlgorithm(const LayeredGraph& g, double eta,
     auto grid = buildGrid(g, eta, gm, rhoHat);
     if (maxPeels && grid.size() > maxPeels) grid.resize(maxPeels);
     best.gridSize = grid.size();
+    const bool adaptive = gm.deltaBox && gm.adaptiveBox && rhoHat > 0;
+    const double step = gridStep(eta, gm.order);
+    if (adaptive)   // near-balanced cells first, so the incumbent tightens the box early
+        std::sort(grid.begin(), grid.end(),
+                  [](const vector<double>& a, const vector<double>& b) {
+                      return distFromBalanced(a) < distFromBalanced(b);
+                  });
+    vector<long double> Dv = computeDelta(g);
+    vector<double> boxLo, boxHi;
     double Dmax = 1.0, alphaF = 1.0;
     long Utot = 0;
     {
-        vector<long double> Dv = computeDelta(g);
         long double dm = 1.0L; for (long double d : Dv) dm = std::max(dm, d);
         Dmax = (double)dm;
         for (int j = 0; j < g.i; ++j) Utot += g.n[j];
@@ -31,6 +39,7 @@ static GridResult gridAlgorithm(const LayeredGraph& g, double eta,
     if (gCertify && passes <= 0) {
         for (size_t k = 0; k < grid.size(); ++k) {
             if (deadline::hit()) break;
+            if (adaptive && !cellInDeltaBox(grid[k], g, rhoStrong, Dv, step, boxLo, boxHi)) continue;
             peeler.init(g);
             double rp = peeler.runPassesPrimal(grid[k], gPatience, kAdaptiveTmax).rho;
             if (rp > rhoStrong) { rhoStrong = rp; winCell = (int)k; }
@@ -48,6 +57,7 @@ static GridResult gridAlgorithm(const LayeredGraph& g, double eta,
             if (deadline::hit()) break;
             auto& M = grid[order[oi]];
             const double inc = std::max({best.rho, rhoStrong, rhoHat});
+            if (adaptive && !cellInDeltaBox(M, g, inc, Dv, step, boxLo, boxHi)) { ++best.boxSkipped; continue; }
             int warmIdx = -1;
             if (!pool.empty()) {
                 long double Ub = 1e300L;
@@ -77,6 +87,8 @@ static GridResult gridAlgorithm(const LayeredGraph& g, double eta,
     }
     for (auto& M : grid) {
         if (deadline::hit()) break;
+        if (adaptive && !cellInDeltaBox(M, g, std::max({best.rho, rhoStrong, rhoHat}),
+                                        Dv, step, boxLo, boxHi)) { ++best.boxSkipped; continue; }
         peeler.init(g);
         PeelResult r;
         if (passes > 0) { r = peeler.runPasses(M, passes); }
@@ -137,11 +149,14 @@ static GridResult gridAlgorithmPruned(const LayeredGraph& g, double eta, int pas
                                    : std::max(0.0, rhoBoot));
     const double safety = 1.0;
     double alphaF = 1.0;
+    vector<long double> Dv = computeDelta(g);
     {
-        vector<long double> Dv = computeDelta(g);
         long double Dmax = 1.0L; for (long double d : Dv) Dmax = std::max(Dmax, d);
         if (rhoBoot > 0) alphaF = std::max(1.0, (double)((long double)g.i * Dmax / rhoBoot));
     }
+    const bool adaptive = gm.deltaBox && gm.adaptiveBox;
+    const double step = gridStep(eta, gm.order);
+    vector<double> boxLo, boxHi;
 
     vector<vector<char>> active(g.i);
     vector<vector<long double>> cL(g.i), cR(g.i);
@@ -154,10 +169,16 @@ static GridResult gridAlgorithmPruned(const LayeredGraph& g, double eta, int pas
     vector<vector<int>> backmap, fwd;
     vector<vector<int>> survScratch;
 
-    size_t step = 0;
+    size_t cellIdx = 0;
     for (auto& M : grid) {
         if (deadline::hit()) break;
-        const size_t s = step++;
+        const size_t s = cellIdx++;
+        if (adaptive && rhoHat > 0 &&
+            !cellInDeltaBox(M, g, rhoHat, Dv, step, boxLo, boxHi)) {
+            agg.boxSkipped++;
+            if (agg.traceOn) agg.trace.push_back({ s, rhoHat, false, -1.0 });
+            continue;
+        }
         for (int j = 0; j < g.i; ++j)
             std::fill(active[j].begin(), active[j].end(), (char)1);
         ReduceStats st = coReduce(g, M, rhoHat, safety, cL, cR, active);

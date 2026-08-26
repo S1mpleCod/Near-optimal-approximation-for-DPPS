@@ -153,6 +153,8 @@ int main(int argc, char** argv) {
         else if (s == "--quiet") quiet = true;
         else if (s == "--deltabox") gm.deltaBox = true;
         else if (s == "--no-deltabox") gm.deltaBox = false;
+        else if (s == "--adaptive-box") gm.adaptiveBox = true;
+        else if (s == "--no-adaptive-box") gm.adaptiveBox = false;
         else if (s == "--trace") traceOn = true;
         else if (s == "--alloc") showAlloc = true;
         else if (s == "--order=arbitrary") bestFirst = false;
@@ -195,6 +197,8 @@ int main(int argc, char** argv) {
                   << "                   incumbent -- guarantee (1-delta)/((1+eta)(1+E)), more pruning\n"
                   << "  --grid=2       : second-order sqrt(eta) lattice (default); --grid=1 first-order\n"
                   << "  --deltabox     : Delta-box localization (default on); --no-deltabox to disable\n"
+                  << "  --adaptive-box : re-tighten the Delta-box to the growing incumbent and skip cells\n"
+                  << "                   that leave it (Sec 5.4; default on); --no-adaptive-box to disable\n"
                   << "  --prune        : co-reduction with an online (growing) incumbent\n"
                   << "  --prune-oracle : measure reduction at the baseline optimum rho*\n"
                   << "  --timeout=S    : algorithm-only cutoff in seconds (default 100; 0 = off)\n"
@@ -271,6 +275,8 @@ int main(int argc, char** argv) {
         std::printf("  solved (peel run)      : %zu\n", agg.solved);
         std::printf("  ELIMINATED (no solve)  : %zu  (%.1f%% of grid)\n",
                     agg.eliminated, pct * (double)agg.eliminated / std::max<size_t>(1, agg.grid));
+        std::printf("  SKIPPED (adaptive box) : %zu  (%.1f%% of grid)\n",
+                    agg.boxSkipped, pct * (double)agg.boxSkipped / std::max<size_t>(1, agg.grid));
         std::printf("per-point removal (mean / max):\n");
         std::printf("  vertices               : %.1f%% / %.1f%%\n",
                     pct * agg.sumVf / std::max<size_t>(1, agg.grid), pct * agg.maxVf);
@@ -303,8 +309,11 @@ int main(int argc, char** argv) {
 
     if (mode == 0) {
         GridResult r = timeCall([&]{ return gridAlgorithm(g, eta, maxPeels, passes, gm); });
-        std::printf("eta=%g  grid=%zu peels  [grid=%d deltabox=%d]\nbest density rho = %.6f\n",
-                    eta, r.gridSize, gm.order, (int)gm.deltaBox, r.rho);
+        std::printf("eta=%g  grid=%zu peels  [grid=%d deltabox=%d adaptive=%d]\nbest density rho = %.6f\n",
+                    eta, r.gridSize, gm.order, (int)gm.deltaBox, (int)gm.adaptiveBox, r.rho);
+        if (gm.deltaBox && gm.adaptiveBox)
+            std::printf("adaptive Delta-box: skipped %zu of %zu cells (solved %zu)\n",
+                        r.boxSkipped, r.gridSize, r.gridSize - r.boxSkipped);
         const bool haveFamily = r.survivors.size() == (size_t)g.i;
         std::printf("part sizes: (");
         for (int j = 0; j < g.i; ++j)

@@ -85,7 +85,7 @@ static double distFromBalanced(const vector<double>& M) {
 struct TraceRec { size_t step; double rhoHat; bool solved; double cellRho; };
 
 struct PruneAgg {
-    size_t grid = 0, solved = 0, eliminated = 0;
+    size_t grid = 0, solved = 0, eliminated = 0, boxSkipped = 0;
     long long peelDecCalls = 0;
     double sumVf = 0, sumEf = 0, sumFf = 0;
     double maxVf = 0, maxEf = 0, maxFf = 0;

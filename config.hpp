@@ -5,6 +5,7 @@ struct GridResult {
     vector<vector<int>> survivors;
     vector<double> M;
     size_t gridSize = 0;
+    size_t boxSkipped = 0;   // cells dropped by the adaptive Delta-box before solving
     long long decKeyCalls = 0, bktMoves = 0;
 };
 
